@@ -1,0 +1,198 @@
+#!/bin/sh
+
+CA_KEY_DIR="/etc/ssh/ca"
+CONF_DIR="$HOME/.ssh"
+AUTHORIZED_KEY_PATH="$CONF_DIR/authorized_keys"
+
+arg_genkey(){
+	quiet=""
+	algo=""
+	bits=""
+	pass=""
+	comment=""
+	while [ $# -gt 0 ];do
+		case $1 in
+			-q)
+				opt_quiet="-q"
+				shift;;
+			-t)
+				shift
+				algo="$1"
+				opt_algo="-t $1"
+				shift;;
+			-b)
+				shift
+				opt_bits="-b $1"
+				shift;;
+			-N)
+				shift
+				opt_pass="-N $1"
+				shift;;
+			-C)
+				shift
+				opt_comment="-C $1"
+				shift;;
+			*)
+				error "ERROR: Unrecognized option '$1'";;
+		esac
+	done
+}
+
+cassh_gen_ca(){
+	arg_genkey "$@"
+	ssh-keygen $opt_quiet $opt_algo $opt_bits $opt_pass $opt_comment -f "$CA_KEY_DIR/ca_$algo"
+}
+
+cassh_gen(){
+	arg_genkey "$@"
+	ssh-keygen $opt_quiet $opt_algo $opt_bits $opt_pass $opt_comment -f ./id_$algo
+}
+
+cassh_list(){
+	out="sec:pub:algorithm"
+	for sec_path in $(find "$CA_KEY_DIR" -regex ".*/ca_[0-9A-Za-z]+");do
+		sec=$(basename "$sec_path")
+		algo=${sec##ca_}
+		if [ -f "$sec_path.pub" ];then
+			pub="$sec.pub"
+		else
+			pub="'Not Exists'"
+		fi
+		out+="\n$sec:$pub:$algo"
+	done
+	echo -e $out | column -t -s ':'
+}
+
+cassh_get_default(){
+	if [ -L $CA_KEY_DIR/default ];then
+		readlink "$CA_KEY_DIR/default"
+		readlink "$CA_KEY_DIR/default.pub"
+	else
+		echo -e "Default key pair not specified. see \"cassh \""
+	fi
+}
+
+cassh_set_default(){
+	echo "Not Implemented: set-default"
+	echo "$@"
+}
+
+cassh_sign(){
+	echo "Not Implemented: sign"
+	echo "$@"
+}
+
+cassh_revoke(){
+	echo "Not Implemented: revoke"
+	echo "$@"
+}
+
+cassh_test(){
+	echo "Not Implemented: test"
+	echo "$@"
+}
+
+arg_remote(){
+	ssh_option=""
+	verbose=""
+	targets=()
+	while [ $# -gt 0 ];do
+		case $1 in
+			-o)
+				shift
+				ssh_option="-o $1"
+				shift
+			-v)
+				verbose="-v";;
+				shift
+			*)
+				targets+=("$1");;
+				shift
+		esac
+	done
+}
+
+cassh_sign_remote(){
+	if [ ${#targets[@]} -gt 0 ]; then
+		TMP_DIR=$(mktemp --tmpdir -d cassh-XXXXXXXX)
+	
+		for target in ${targets[@]}; do
+			echo "Downloading public keys from $target."
+			if scp -q $verbose $target:.ssh/id_*.pub $TMP_DIR;then
+				rm -f $TMP_DIR/id_*-cert.pub
+				echo "Downloaded keys:"
+				echo "$(ls $TMP_DIR)"
+		
+				id_base=$(ssh $ssh_option $target echo "\$USER@\$HOSTNAME")
+				for key_path in $(ls $TMP_DIR/*.pub 2>&- | grep -v ".*-cert.pub"); do
+					key_file=$(basename $key_path)
+					algo=$(echo $key_file | sed -re "s/id_(.*).pub/\1/")
+					echo "Signing the key ($key_file) for $target"
+					ssh-keygen -s "$CA_KEY_DIR/default" -I "$id_base:$algo" -q $key_path
+				done
+				echo "Uploading certificates to $target."
+				scp $verbose $TMP_DIR/id_*-cert.pub $target:.ssh/
+				echo "Complete."
+			else
+				echo "No public keys found in $target."
+			fi
+		done
+	
+		rm -rf $TMP_DIR
+	fi
+}
+
+cassh_copy_id(){
+	if [ ${#targets[@]} -gt 0 ]; then
+		# Create authorized_keys file for targets.
+		TMP_KEYS=`mktemp`
+		for key in $(find "$CA_KEY_DIR" -name "ca_*.pub"); do
+			echo "cert-authority `cat $key`" >> $TMP_KEYS
+		done
+		
+		commands="mkdir -p $CONF_DIR && chmod 700 $CONF_DIR && (echo '$(cat $TMP_KEYS)' > $AUTHORIZED_KEY_PATH) && chmod 600 $AUTHORIZED_KEY_PATH"
+
+		for target in ${targets[@]}; do
+			ssh $ssh_option $verbose $target "$commands"
+		done
+	
+		# Remove the file
+		rm $TMP_KEYS
+	fi
+}
+
+error(){
+	echo "$@" >&2
+	exit 1
+}
+
+subcommand=$1;shift
+case $subcommand in
+	gen-ca)
+		arg_genkey "$@"
+		cassh_gen_ca "$@";;
+	gen)
+		arg_genkey "$@"
+		cassh_gen "$@";;
+	list)
+		cassh_list "$@";;
+	get-default)
+		cassh_get_default "$@";;
+	set-default)
+		cassh_set_default "$@";;
+	sign)
+		cassh_sign "$@";;
+	revoke)
+		cassh_revoke "$@";;
+	test)
+		cassh_test "$@";;
+	sign-remote)
+		arg_remote "$@"
+		cassh_sign_remote "$@";;
+	copy-id)
+		arg_remote "$@"
+		cassh_copy_id "$@";;
+	*)
+		error "ERROR: Unrecognizable command '$subcommand'";;
+esac
+
