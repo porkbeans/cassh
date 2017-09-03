@@ -1,8 +1,8 @@
 #!/bin/sh
 
 CA_KEY_DIR="/etc/ssh/ca"
-CONF_DIR="$HOME/.ssh"
-AUTHORIZED_KEY_PATH="$CONF_DIR/authorized_keys"
+CONF_DIR="${HOME}/.ssh"
+AUTHORIZED_KEY_PATH="${CONF_DIR}/authorized_keys"
 
 arg_genkey(){
 	quiet=""
@@ -10,6 +10,7 @@ arg_genkey(){
 	bits=""
 	pass=""
 	comment=""
+	keyname=""
 	while [ $# -gt 0 ];do
 		case $1 in
 			-q)
@@ -32,6 +33,10 @@ arg_genkey(){
 				shift
 				opt_comment="-C $1"
 				shift;;
+			-k)
+				shift
+				opt_keyname="$1"
+				shift;;
 			*)
 				error "ERROR: Unrecognized option '$1'";;
 		esac
@@ -40,46 +45,70 @@ arg_genkey(){
 
 cassh_gen_ca(){
 	arg_genkey "$@"
-	ssh-keygen $opt_quiet $opt_algo $opt_bits $opt_pass $opt_comment -f "$CA_KEY_DIR/ca_$algo"
+
+	if [ -z "$opt_keyname" ];then
+		opt_keyname="ca_${algo}"
+	fi
+
+	ssh-keygen $opt_quiet $opt_algo $opt_bits $opt_pass $opt_comment -f "${CA_KEY_DIR}/ca_${opt_keyname}"
 }
 
 cassh_gen(){
 	arg_genkey "$@"
-	ssh-keygen $opt_quiet $opt_algo $opt_bits $opt_pass $opt_comment -f ./id_$algo
+
+	if [ -z "$opt_keyname" ];then
+		opt_keyname="id_${algo}"
+	fi
+
+	ssh-keygen $opt_quiet $opt_algo $opt_bits $opt_pass $opt_comment -f "${CONF_DIR}/id_${opt_keyname}"
 }
 
 cassh_list(){
-	out="sec:pub:algorithm"
-	for sec_path in $(find "$CA_KEY_DIR" -regex ".*/ca_[0-9A-Za-z]+");do
+	out="secret:public:algorithm:path"
+	for sec_path in $(find "$CA_KEY_DIR" -regex ".*/ca_[^.]+");do
 		sec=$(basename "$sec_path")
-		algo=${sec##ca_}
+		algo=$(cut -d ' ' -f 1 "${sec_path}.pub")
 		if [ -f "$sec_path.pub" ];then
 			pub="$sec.pub"
 		else
 			pub="'Not Exists'"
 		fi
-		out+="\n$sec:$pub:$algo"
+		out+="\n${sec}:${pub}:${algo}:${sec_path}"
 	done
 	echo -e $out | column -t -s ':'
 }
 
 cassh_get_default(){
-	if [ -L $CA_KEY_DIR/default ];then
-		readlink "$CA_KEY_DIR/default"
-		readlink "$CA_KEY_DIR/default.pub"
+	if [ -L ${CA_KEY_DIR}/default ];then
+		readlink "${CA_KEY_DIR}/default"
+		readlink "${CA_KEY_DIR}/default.pub"
 	else
 		echo -e "Default key pair not specified. see \"cassh \""
 	fi
 }
 
 cassh_set_default(){
-	echo "Not Implemented: set-default"
-	echo "$@"
+	if [ $# -lt 2 ];then
+		keyname="$1"
+		sec_path="${CA_KEY_DIR}/${keyname}"
+		pub_path="${CA_KEY_DIR}/${keyname}.pub"
+
+		if (stat "${sec_path}" "${pub_path}" >/dev/null 2>&1);then
+			ln -srf "${CA_KEY_DIR}/${keyname}" "${CA_KEY_DIR}/default"
+			ln -srf "${CA_KEY_DIR}/${keyname}.pub" "${CA_KEY_DIR}/default.pub"
+		else
+			echo "Files not found: ${sec_path} ${pub_path}"
+		fi
+	else
+		echo "Too many arguments $# (must be only 1): $@"
+	fi
 }
 
 cassh_sign(){
 	echo "Not Implemented: sign"
 	echo "$@"
+	keyname="$1"
+	ssh-keygen -s "${CA_KEY_DIR}/default" -I "${USER}@${HOSTNAME}:${keyname}" -q "${CONF_DIR}/${keyname}.pub"
 }
 
 cassh_revoke(){
@@ -101,13 +130,13 @@ arg_remote(){
 			-o)
 				shift
 				ssh_option="-o $1"
-				shift
+				shift;;
 			-v)
-				verbose="-v";;
-				shift
+				verbose="-v"
+				shift;;
 			*)
-				targets+=("$1");;
-				shift
+				targets+=("$1")
+				shift;;
 		esac
 	done
 }
@@ -115,14 +144,14 @@ arg_remote(){
 cassh_sign_remote(){
 	if [ ${#targets[@]} -gt 0 ]; then
 		TMP_DIR=$(mktemp --tmpdir -d cassh-XXXXXXXX)
-	
+
 		for target in ${targets[@]}; do
 			echo "Downloading public keys from $target."
 			if scp -q $verbose $target:.ssh/id_*.pub $TMP_DIR;then
 				rm -f $TMP_DIR/id_*-cert.pub
 				echo "Downloaded keys:"
 				echo "$(ls $TMP_DIR)"
-		
+
 				id_base=$(ssh $ssh_option $target echo "\$USER@\$HOSTNAME")
 				for key_path in $(ls $TMP_DIR/*.pub 2>&- | grep -v ".*-cert.pub"); do
 					key_file=$(basename $key_path)
@@ -137,7 +166,7 @@ cassh_sign_remote(){
 				echo "No public keys found in $target."
 			fi
 		done
-	
+
 		rm -rf $TMP_DIR
 	fi
 }
@@ -145,17 +174,17 @@ cassh_sign_remote(){
 cassh_copy_id(){
 	if [ ${#targets[@]} -gt 0 ]; then
 		# Create authorized_keys file for targets.
-		TMP_KEYS=`mktemp`
+		TMP_KEYS=$(mktemp)
 		for key in $(find "$CA_KEY_DIR" -name "ca_*.pub"); do
 			echo "cert-authority `cat $key`" >> $TMP_KEYS
 		done
-		
+
 		commands="mkdir -p $CONF_DIR && chmod 700 $CONF_DIR && (echo '$(cat $TMP_KEYS)' > $AUTHORIZED_KEY_PATH) && chmod 600 $AUTHORIZED_KEY_PATH"
 
 		for target in ${targets[@]}; do
 			ssh $ssh_option $verbose $target "$commands"
 		done
-	
+
 		# Remove the file
 		rm $TMP_KEYS
 	fi
@@ -195,4 +224,3 @@ case $subcommand in
 	*)
 		error "ERROR: Unrecognizable command '$subcommand'";;
 esac
-
